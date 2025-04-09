@@ -1,0 +1,69 @@
+import pandas as pd
+from openpyxl import load_workbook
+from google.colab import files
+import io
+
+# Step 1: Upload files
+print("📤 Upload the CBL CSV file:")
+uploaded_cbl = files.upload()
+cbl_filename = next(iter(uploaded_cbl))
+
+print("📤 Upload the ESPM Excel file:")
+uploaded_espm = files.upload()
+espm_filename = next(iter(uploaded_espm))
+
+output_filename = "Updated_ESPM_File.xlsx"
+
+# Step 2: Load CBL
+cbl_df = pd.read_csv(io.BytesIO(uploaded_cbl[cbl_filename]), dtype=str)
+cbl_df["BBL"] = cbl_df["10 Digit BBL"].str.strip()
+cbl_df["Full Address"] = cbl_df["Street Number"].str.strip() + " " + cbl_df["Street Name"].str.strip()
+cbl_lookup = cbl_df.set_index("BBL")[["Full Address", "Zip Code"]].to_dict("index")
+
+# Step 3: Load ESPM file and normalize BBLs
+with open(output_filename, 'wb') as f:
+    f.write(uploaded_espm[espm_filename])
+wb = load_workbook(output_filename)
+props_ws = wb["Properties"]
+ids_ws = wb["Property IDs"]
+
+# Read PM ID and raw BBL from Property IDs sheet
+pm_ids = [str(cell.value).strip() for cell in ids_ws["A"][1:]]
+raw_bbls = [str(cell.value).strip() if cell.value else "" for cell in ids_ws["J"][1:]]
+
+# Clean and fix BBLs (keep only 10 digit numeric string)
+def normalize_bbl(val):
+    cleaned = ''.join(filter(str.isdigit, val))
+    return cleaned if len(cleaned) == 10 else None
+
+cleaned_bbls = [normalize_bbl(bbl) for bbl in raw_bbls]
+pmid_to_bbl = {pm_ids[i]: cleaned_bbls[i] for i in range(len(pm_ids)) if cleaned_bbls[i]}
+
+# Step 4: Add new columns to 'Properties'
+headers = [cell.value for cell in props_ws[1]]
+addr_col = len(headers) + 1
+zip_col = len(headers) + 2
+
+props_ws.cell(row=1, column=addr_col, value="Updated Street Address")
+props_ws.cell(row=1, column=zip_col, value="Updated Zip Code")
+
+# Step 5: Update the Properties sheet (preserve existing if no match)
+updated_count = 0
+for row in props_ws.iter_rows(min_row=2):
+    pm_id = str(row[0].value).strip()
+    bbl = pmid_to_bbl.get(pm_id)
+
+    if bbl and bbl in cbl_lookup:
+        row[addr_col - 1].value = cbl_lookup[bbl]["Full Address"]
+        row[zip_col - 1].value = cbl_lookup[bbl]["Zip Code"]
+        updated_count += 1
+    else:
+        # If no match, copy original values to new columns
+        row[addr_col - 1].value = row[2].value  # Original "Street Address"
+        row[zip_col - 1].value = row[8].value  # Original "Postal Code"
+
+
+# Step 6: Save and download
+wb.save(output_filename)
+print(f"✅ {updated_count} addresses added successfully.")
+files.download(output_filename)
